@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <title>Typhoon</title>
+  
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-FDTDHHESS4"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'G-FDTDHHESS4');
+  </script>
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,200..900;1,8..60,200..900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./style.css" type="text/css" media="all" />
+</head>
+<body>
+  <div id="container">
+    <div id="spotlight"></div>
+    <div id="mask"></div>
+  </div>
+
+  <script type="module">
+    import { tape, appendToTape, initRows, populateRows, snapTo,
+             startAnimation, continueAnimation, stopAnimation, relayout, pauseAnimation,
+             applyRowVisibility, setProbStorm, getProbStorm } from "./storm.js";
+    let initStormSound = () => Promise.resolve(), connectStormOutput = () => false,
+        startBed = () => false, pauseBed = () => {}, resumeBed = () => {},
+        setStorm = () => false, setTts = () => false;
+    try {
+      ({ initStormSound, connectStormOutput, startBed, pauseBed, resumeBed,
+         setStorm, setTts } = await import("./stormsound.js"));
+    } catch (e) { console.warn('[stormsound] module unavailable — running dry', e); }
+
+    const container = document.getElementById("container");
+
+    const _BG = { hC:220, hS:350, sC:60, sS:70, lC:4, lS:7 };
+    const _lerp = (a, b, t) => a + (b - a) * t;
+    const _mask = document.getElementById('mask');
+    let _bgLast = null;
+    function _bgLoop() {
+      const p = Math.round(getProbStorm() * 500) / 500;
+      if (p === _bgLast) { requestAnimationFrame(_bgLoop); return; }
+      _bgLast = p;
+      const color = `hsl(${_lerp(_BG.hC,_BG.hS,p)}, ${_lerp(_BG.sC,_BG.sS,p)}%, ${_lerp(_BG.lC,_BG.lS,p)}%)`;
+      document.body.style.backgroundColor = color;
+      document.documentElement.style.backgroundColor = color;
+      document.documentElement.style.setProperty('--bg', color);
+      document.documentElement.style.setProperty('--bg0',
+        `hsla(${_lerp(_BG.hC,_BG.hS,p)}, ${_lerp(_BG.sC,_BG.sS,p)}%, ${_lerp(_BG.lC,_BG.lS,p)}%, 0)`);
+      if (_mask) _mask.style.borderColor = color;
+      requestAnimationFrame(_bgLoop);
+    }
+
+    let _audioCtx = null, _currentSource = null, _scheduleCtxAt = 0, _stormReady = null;
+    function _unlockAudioContext() {
+      try {
+        _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = _audioCtx.createBuffer(1, 1, 22050);
+        const src = _audioCtx.createBufferSource();
+        src.buffer = buf; src.connect(_audioCtx.destination); src.start(0);
+        if (_audioCtx.state === 'suspended') _audioCtx.resume();
+        _stormReady = initStormSound(_audioCtx)
+          .then(() => { connectStormOutput(_audioCtx.destination); startBed(); })
+          .catch(e => { console.warn('[stormsound] init failed — running without ambience', e); });
+      } catch (e) { console.warn('[audio unlock]', e); }
+    }
+    function _playBuffer(buffer, offsetS = 0) {
+      const src = _audioCtx.createBufferSource();
+      src.buffer = buffer; src.connect(_audioCtx.destination);
+      if (_audioCtx.state === 'suspended') { try { _currentSource?.stop(); } catch (e) {} }
+      const startAt = Math.max(_audioCtx.currentTime, _scheduleCtxAt);
+      src.start(startAt, Math.min(offsetS, Math.max(0, buffer.duration - 0.05)));
+      const leadMs = Math.max(0, (startAt - _audioCtx.currentTime) * 1000);
+      setTimeout(() => setTts(1), leadMs);
+      src.onended = () => { if (_currentSource === src) setTts(0); };
+      _currentSource = src;
+      _scheduleCtxAt = startAt + buffer.duration - Math.min(offsetS, buffer.duration);
+    }
+    function decode(section) {
+      section._bufferPromise ??= fetch(section.audio_url)
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
+        .then(b => _audioCtx.decodeAudioData(b))
+        .then(buf => (section._buffer = buf))
+        .catch(err => { section._bufferPromise = null; throw err; });
+      return section._bufferPromise;
+    }
+
+    const LEAD_S = 0.35;
+    const DRIFT_TOLERANCE_S = 3;
+    let _sections = [];
+    let _running = false;
+    let _totalSec = 0;
+    let _clockSkewMs = 0;
+    const _now = () => Date.now() + _clockSkewMs;
+
+    function loopPosition() {
+      const total = _totalSec || _sections.reduce((a, s) => a + s.duration, 0);
+      let t = (_now() / 1000) % total;
+      for (let i = 0; i < _sections.length; i++) {
+        if (t < _sections[i].duration)
+          return { idx: i, offset: Math.min(t, Math.max(0, _sections[i].duration - 1)) };
+        t -= _sections[i].duration;
+      }
+      return { idx: 0, offset: 0 };
+    }
+
+    function _startAtClock() {
+      const { idx, offset } = loopPosition();
+      _running = true;
+      playFrom(idx, true, offset).catch(err => { console.error('[start]', err); _finish(); });
+    }
+
+    async function playFrom(idx, first, offsetS = 0) {
+      if (!first && _totalSec) {
+        const pos = loopPosition();
+        const here = _sections[idx].startSec;
+        const there = _sections[pos.idx].startSec + pos.offset;
+        const delta = (((there - here + _totalSec / 2) % _totalSec) + _totalSec) % _totalSec - _totalSec / 2;
+        if (Math.abs(delta) > DRIFT_TOLERANCE_S) { _resync(); return; }
+      }
+      let s = _sections[idx];
+      await decode(s);
+      if (first) {
+        for (let hops = 0; _totalSec && hops < 3; hops++) {
+          const pos = loopPosition();
+          if (pos.idx === idx) { offsetS = pos.offset; break; }
+          idx = pos.idx; s = _sections[idx];
+          await decode(s);
+        }
+        offsetS = Math.min(offsetS, Math.max(0, s.duration - 1));
+      } else {
+        offsetS = 0;
+      }
+      const from = offsetS > 0
+        ? s.tapeStart + Math.round((s.tapeEnd - s.tapeStart) * (offsetS / s.duration))
+        : s.tapeStart;
+      setProbStorm(s.prob_storm);
+      setStorm(s.prob_storm);
+      if (_audioCtx.state === 'suspended' && !document.hidden) _audioCtx.resume().catch(() => {});
+      if (!document.hidden) resumeBed();
+      if (first) snapTo(from, s.tapeEnd);
+      populateRows(from, from);
+      _playBuffer(s._buffer, offsetS);
+      const onNearEnd = () => {
+        const adv = (idx + 1 < _sections.length)
+          ? playFrom(idx + 1, false)
+          : new Promise(ok => setTimeout(() => { _wrap(); ok(); }, LEAD_S * 1000 + 100));
+        Promise.resolve(adv).catch(err => { console.error('[section]', err); _finish(); });
+      };
+      if (first) startAnimation(from, s.tapeEnd, s.duration - offsetS, onNearEnd, LEAD_S);
+      else       continueAnimation(s.tapeStart, s.tapeEnd, s.duration + LEAD_S, onNearEnd, LEAD_S);
+      const nextIdx = (idx + 1) % _sections.length;
+      if (nextIdx !== idx) decode(_sections[nextIdx]).catch(() => {});
+      for (let i = 0; i < _sections.length; i++) {
+        if (i === idx || i === nextIdx) continue;
+        _sections[i]._buffer = null;
+        _sections[i]._bufferPromise = null;
+      }
+    }
+
+    function _wrap() {
+      stopAnimation();
+      try { _currentSource?.stop(); } catch (e) {}
+      _currentSource = null;
+      _scheduleCtxAt = 0;
+      _startAtClock();
+    }
+
+    function _finish() {
+      _running = false;
+      stopAnimation();
+      try { _currentSource?.stop(); } catch (e) {}
+      _currentSource = null;
+      setTts(0);
+      pauseBed();
+      if (_sections.length) setTimeout(_resync, 5000);
+    }
+
+    function _resync() {
+      stopAnimation();
+      try { _currentSource?.stop(); } catch (e) {}
+      _currentSource = null;
+      _scheduleCtxAt = 0;
+      _startAtClock();
+    }
+
+    function _armGesture() {
+      const cleanup = () => {
+        window.removeEventListener('pointerdown', arm);
+        window.removeEventListener('keydown', arm);
+        window.removeEventListener('touchstart', arm);
+      };
+      const arm = () => {
+        if (_audioCtx.state === 'running') { cleanup(); startBed(); return; }
+        _audioCtx.resume().then(() => { cleanup(); startBed(); _resync(); }).catch(() => {});
+      };
+      window.addEventListener('pointerdown', arm);
+      window.addEventListener('keydown', arm);
+      window.addEventListener('touchstart', arm);
+    }
+
+    async function boot() {
+      try {
+        try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+        const t0 = Date.now();
+        const resp = await fetch('./run/manifest.json', { cache: 'no-store' });
+        const t1 = Date.now();
+        const manifest = await resp.json();
+        const serverMs = Date.parse((resp.headers.get('date') || '').split(',').slice(-2).join(','));
+        if (serverMs) {
+          const skew = serverMs + (t1 - t0) / 2 - t1;
+          if (Math.abs(skew) > 3000) _clockSkewMs = skew;
+        }
+        _sections = manifest.sections.map(s => ({
+          text: s.text, audio_url: `./run/${s.audio_file}`,
+          duration: s.duration, prob_storm: s.prob_storm,
+        }));
+        let acc = 0;
+        for (const s of _sections) { s.startSec = acc; acc += s.duration; }
+        _totalSec = acc;
+
+        const fontLoaded = await Promise.race([
+          document.fonts.load('1em "Source Serif 4"').then(() => true, () => false),
+          new Promise(ok => setTimeout(() => ok(false), 4000)),
+        ]);
+        if (!fontLoaded) document.fonts.ready.then(() => {
+          if (!tape.chars.length) return;
+          relayout();
+          window.dispatchEvent(new Event('resize'));
+        });
+
+        const flat = _sections.map(s => s.text.trim()).join(' ');
+        tape.chars = []; tape.cumWidths = [0];
+        appendToTape(flat.slice(-2500).replace(/^\S*\s/, '') + ' ');
+        for (const s of _sections) {
+          const { startIdx, endIdx } = appendToTape(s.text + ' ');
+          s.tapeStart = startIdx; s.tapeEnd = endIdx;
+        }
+        appendToTape(flat.slice(0, 2500).replace(/\s\S*$/, '') + ' ');
+        initRows(container);
+        _unlockAudioContext();
+        if (_audioCtx && _audioCtx.state !== 'running') _armGesture();
+        const pre = loopPosition();
+        const s0 = _sections[pre.idx];
+        snapTo(s0.tapeStart, s0.tapeEnd);
+        populateRows(s0.tapeStart, s0.tapeStart);
+        applyRowVisibility(getProbStorm());
+
+        await decode(_sections[pre.idx]);
+        await _stormReady;
+        _bgLoop();
+        _startAtClock();
+        if (document.hidden) {
+          pauseAnimation();
+          pauseBed();
+          _audioCtx?.suspend().catch(() => {});
+        }
+      } catch (e) {
+        console.error(e);
+        _finish();
+      }
+    }
+
+    boot();
+
+    let _rt = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(_rt);
+      _rt = setTimeout(() => { if (_running && tape.chars.length) relayout(); }, 250);
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (!_running) return;
+      if (document.hidden) {
+        pauseAnimation();
+        pauseBed();
+        _audioCtx?.suspend().catch(() => {});
+      } else {
+        _audioCtx?.resume().catch(() => {});
+        resumeBed();
+        _resync();
+      }
+    });
+
+  </script>
+
+    <script type="module">
+    import { config, tape, getPlayIdx } from "./storm.js";
+
+    const POP = {
+      triggerGapMs: 500,
+      riseMs: 1400,
+      settleMs: 800,
+      absMin: 0.5,
+      absMax: 1.15,
+      scaleFloor: 0.85,
+      scaleCap: 4.5,
+      maxPerRow: 3,
+      maxPerCycle: 14,
+      maxActive: 32,
+      overlapPad: 24,
+      overlapPadY: 4,
+      minRowOpacity: 0.5,
+      edgePx: 12,
+      jumpChars: 120,
+    };
+
+    const _pw = await fetch('./run/popwords.json').then(r => r.json());
+    const WORDS = new Set([..._pw.words, ..._pw.degenerations]);
+    const PHRASES = _pw.phrases.map(p => p.split(' '));
+
+    document.head.insertAdjacentHTML('beforeend', `<style>
+      .pop-word {
+        position:absolute; top:0; left:0; pointer-events:none;
+        will-change:transform; transform-origin:0 72%;
+      }
+    </style>`);
+    document.getElementById('mask').style.zIndex = '6';
+
+    const WORD_RE = /[A-Za-z][A-Za-z'’-]*[A-Za-z]|[A-Za-z]/g;
+    const _norm = w => w.toLowerCase().replace(/’/g, "'");
+    const _phraseByFirst = new Map();
+    for (const p of PHRASES) {
+      if (!_phraseByFirst.has(p[0])) _phraseByFirst.set(p[0], []);
+      _phraseByFirst.get(p[0]).push(p);
+    }
+    let _ranges = [], _ri = 0, _tapeRef = null, _scanLen = -1, _lastPi = -1;
+
+    function _rescan() {
+      _cancelAll();
+      _tapeRef = tape.chars; _scanLen = tape.chars.length;
+      const toks = [];
+      for (const m of tape.chars.join('').matchAll(WORD_RE))
+        toks.push({ w: _norm(m[0]), start: m.index, end: m.index + m[0].length });
+      _ranges = [];
+      for (let i = 0; i < toks.length; i++) {
+        let hit = null;
+        for (const p of _phraseByFirst.get(toks[i].w) || []) {
+          if (i + p.length <= toks.length && p.every((t, k) => toks[i + k].w === t) &&
+              (!hit || p.length > hit.length)) hit = p;
+        }
+        if (hit) {
+          _ranges.push({ start: toks[i].start, end: toks[i + hit.length - 1].end });
+          i += hit.length - 1;
+        } else if (WORDS.has(toks[i].w)) {
+          _ranges.push({ start: toks[i].start, end: toks[i].end });
+        }
+      }
+      _ri = 0;
+      _lastPi = getPlayIdx();
+    }
+
+    function _rangeAtPx(px) {
+      let lo = 0, hi = _ranges.length;
+      while (lo < hi) {
+        const m = (lo + hi) >> 1;
+        if (tape.cumWidths[_ranges[m].start] < px) lo = m + 1; else hi = m;
+      }
+      return lo;
+    }
+    function _curTx(el) {
+      const t = getComputedStyle(el).transform;
+      return t && t !== 'none' ? new DOMMatrixReadOnly(t).m41 : 0;
+    }
+
+    const _popped = new Map();
+    const _rowUse = new Map();
+
+    function _rowElevate(row) {
+      if (!(_rowUse.get(row) > 0)) {
+        row.style.overflow = 'visible';
+        row.style.contain = 'layout';
+        row.style.zIndex = '4';
+      }
+      _rowUse.set(row, (_rowUse.get(row) || 0) + 1);
+    }
+    function _rowRestore(row) {
+      const n = (_rowUse.get(row) || 1) - 1;
+      if (n > 0) _rowUse.set(row, n);
+      else {
+        _rowUse.delete(row);
+        row.style.overflow = '';
+        row.style.contain = '';
+        row.style.zIndex = '';
+      }
+    }
+
+    function _drawGrow(scale) {
+      const target = POP.absMin + Math.random() * (POP.absMax - POP.absMin);
+      return Math.min(POP.scaleCap, Math.max(POP.scaleFloor, target / scale));
+    }
+
+    function _popRect(rowBox, tx, scale, r, grow) {
+      const w = (tape.cumWidths[r.end] - tape.cumWidths[r.start]) * scale * grow;
+      const h = rowBox.height * grow;
+      return { x: tx + tape.cumWidths[r.start] * scale,
+               y: rowBox.top + rowBox.height * 0.72 - h * 0.72, w, h };
+    }
+    function _apart(a, b) {
+      return a.x + a.w + POP.overlapPad < b.x || b.x + b.w + POP.overlapPad < a.x ||
+             a.y + a.h + POP.overlapPadY < b.y || b.y + b.h + POP.overlapPadY < a.y;
+    }
+
+    function _popApply(r, row, spanMap, scale, key, grow) {
+      const spans = [];
+      for (let ci = r.start; ci < r.end; ci++) {
+        const sp = spanMap.get(ci);
+        if (!sp) return false;
+        spans.push(sp);
+      }
+      const px = tape.cumWidths[r.start] * scale;
+      const clone = document.createElement('span');
+      clone.className = 'pop-word';
+      clone.textContent = tape.chars.slice(r.start, r.end).join('');
+      clone.style.transform = `translateX(${px}px) scale(1)`;
+      row.firstElementChild.appendChild(clone);
+      for (const sp of spans) sp.style.visibility = 'hidden';
+      _rowElevate(row);
+      void clone.offsetWidth;
+      clone.style.transition =
+        `transform ${POP.riseMs}ms cubic-bezier(.16,.6,.3,1), ` +
+        `color ${POP.riseMs * 0.6}ms ease-in-out, ` +
+        `text-shadow ${POP.riseMs * 0.6}ms ease-in-out, font-weight ${POP.riseMs}ms ease`;
+      clone.style.transform = `translateX(${px}px) scale(${grow})`;
+      clone.style.color = '#fff';
+      clone.style.textShadow = '0 0 0.35em rgba(255,255,255,0.55)';
+      clone.style.fontWeight = '640';
+      _popped.set(key, { key, clone, spans, row, px, t: 0,
+                         start: r.start, end: r.end, scale, grow });
+      return true;
+    }
+
+    function _cleanup(rec) {
+      clearTimeout(rec.t);
+      rec.clone.remove();
+      for (const sp of rec.spans) sp.style.visibility = '';
+      _rowRestore(rec.row);
+      _popped.delete(rec.key);
+    }
+
+    function _settleAll() {
+      for (const rec of _popped.values()) {
+        if (rec.t) continue;
+        rec.clone.style.transition =
+          `transform ${POP.settleMs}ms ease-in, color ${POP.settleMs}ms ease, ` +
+          `text-shadow ${POP.settleMs}ms ease, font-weight ${POP.settleMs}ms ease`;
+        rec.clone.style.transform = `translateX(${rec.px}px) scale(1)`;
+        rec.clone.style.color = '';
+        rec.clone.style.textShadow = '';
+        rec.clone.style.fontWeight = '';
+        rec.t = setTimeout(() => _cleanup(rec), POP.settleMs + 60);
+      }
+    }
+
+    function _cancelAll() {
+      _triggers = [];
+      for (const rec of [..._popped.values()]) _cleanup(rec);
+    }
+
+    function _groupPop() {
+      let budget = Math.min(POP.maxPerCycle, POP.maxActive - _popped.size);
+      const order = [...Array(config.numOfLines).keys()]
+        .sort((a, b) => Math.abs(a - config.centerRow) - Math.abs(b - config.centerRow));
+      const rowBoxes = new Map();
+      const boxFor = row => {
+        if (!rowBoxes.has(row)) rowBoxes.set(row, row.getBoundingClientRect());
+        return rowBoxes.get(row);
+      };
+      const taken = [];
+      for (const rec of _popped.values()) {
+        const inner = rec.row.firstElementChild;
+        if (inner) taken.push(_popRect(boxFor(rec.row), _curTx(inner), rec.scale, rec, rec.grow));
+      }
+      for (const ri of order) {
+        if (ri === config.centerRow) continue;
+        if (budget <= 0) break;
+        const row = document.getElementById('scroll' + ri);
+        const inner = row && row.firstElementChild;
+        if (!inner) continue;
+        if (parseFloat(row.style.opacity || '1') < POP.minRowOpacity) continue;
+        const scale = config.fontSizeRatios[ri];
+        const tx = _curTx(inner);
+        const lo = (-tx + POP.edgePx) / scale;
+        const hi = (row.clientWidth - tx - POP.edgePx) / scale;
+        const rowCap = scale < 0.4 ? 2 : POP.maxPerRow;
+        let spanMap = null, n = 0;
+        for (let k = _rangeAtPx(lo); k < _ranges.length && n < rowCap && budget > 0; k++) {
+          const r = _ranges[k];
+          if (tape.cumWidths[r.start] > hi) break;
+          if (tape.cumWidths[r.end] > hi) continue;
+          const key = ri + ':' + r.start;
+          if (_popped.has(key)) continue;
+          const grow = _drawGrow(scale);
+          const box = _popRect(boxFor(row), tx, scale, r, grow);
+          if (taken.some(t => !_apart(box, t))) continue;
+          if (!spanMap) {
+            spanMap = new Map();
+            for (const sp of inner.children)
+              if (sp.classList.contains('scroll-item')) spanMap.set(+sp.dataset.ci, sp);
+          }
+          if (_popApply(r, row, spanMap, scale, key, grow)) {
+            taken.push(box);
+            n++; budget--;
+          }
+        }
+      }
+    }
+
+    let _triggers = [];
+    let _lastSweep = -1e9;
+
+    (function _loop() {
+      requestAnimationFrame(_loop);
+      if (tape.chars !== _tapeRef || tape.chars.length !== _scanLen) {
+        if (!tape.chars.length) { _tapeRef = tape.chars; _scanLen = 0; return; }
+        _rescan();
+      }
+      if (!_ranges.length) return;
+      const pi = getPlayIdx();
+      const jumped = pi - _lastPi > POP.jumpChars || pi < _lastPi;
+      while (_ri < _ranges.length && _ranges[_ri].start <= pi) {
+        const r = _ranges[_ri++];
+        if (!jumped && r.start > _lastPi) {
+          _triggers.push(r);
+          const now = performance.now();
+          if (now - _lastSweep >= POP.triggerGapMs) { _lastSweep = now; _groupPop(); }
+        }
+      }
+      _lastPi = pi;
+      if (_triggers.length) {
+        const row = document.getElementById('scroll' + config.centerRow);
+        const inner = row && row.firstElementChild;
+        if (inner) {
+          const tx = _curTx(inner);
+          const scale = config.fontSizeRatios[config.centerRow];
+          _triggers = _triggers.filter(t => tape.cumWidths[t.end] * scale + tx > 0);
+        }
+        if (!_triggers.length) _settleAll();
+      }
+    })();
+
+    window.addEventListener('resize', _cancelAll);
+  </script>
+</body>
+</html>
