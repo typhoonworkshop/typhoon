@@ -74,7 +74,7 @@
     function _playBuffer(buffer, offsetS = 0) {
       const src = _audioCtx.createBufferSource();
       src.buffer = buffer; src.connect(_audioCtx.destination);
-      if (_audioCtx.state === 'suspended') { try { _currentSource?.stop(); } catch (e) {} }
+      if (_audioCtx.state !== 'running') { try { _currentSource?.stop(); } catch (e) {} }
       const startAt = Math.max(_audioCtx.currentTime, _scheduleCtxAt);
       src.start(startAt, Math.min(offsetS, Math.max(0, buffer.duration - 0.05)));
       const leadMs = Math.max(0, (startAt - _audioCtx.currentTime) * 1000);
@@ -96,6 +96,7 @@
     const DRIFT_TOLERANCE_S = 3;
     let _sections = [];
     let _running = false;
+    let _epoch = 0;
     let _totalSec = 0;
     let _clockSkewMs = 0;
     const _now = () => Date.now() + _clockSkewMs;
@@ -112,12 +113,14 @@
     }
 
     function _startAtClock() {
+      _epoch++;
       const { idx, offset } = loopPosition();
       _running = true;
       playFrom(idx, true, offset).catch(err => { console.error('[start]', err); _finish(); });
     }
 
     async function playFrom(idx, first, offsetS = 0) {
+      const ep = _epoch;
       if (!first && _totalSec) {
         const pos = loopPosition();
         const here = _sections[idx].startSec;
@@ -127,12 +130,14 @@
       }
       let s = _sections[idx];
       await decode(s);
+      if (ep !== _epoch) return;
       if (first) {
         for (let hops = 0; _totalSec && hops < 3; hops++) {
           const pos = loopPosition();
           if (pos.idx === idx) { offsetS = pos.offset; break; }
           idx = pos.idx; s = _sections[idx];
           await decode(s);
+          if (ep !== _epoch) return;
         }
         offsetS = Math.min(offsetS, Math.max(0, s.duration - 1));
       } else {
@@ -143,15 +148,16 @@
         : s.tapeStart;
       setProbStorm(s.prob_storm);
       setStorm(s.prob_storm);
-      if (_audioCtx.state === 'suspended' && !document.hidden) _audioCtx.resume().catch(() => {});
+      if (_audioCtx.state !== 'running' && !document.hidden) _audioCtx.resume().catch(() => {});
       if (!document.hidden) resumeBed();
       if (first) snapTo(from, s.tapeEnd);
       populateRows(from, from);
       _playBuffer(s._buffer, offsetS);
       const onNearEnd = () => {
+        if (ep !== _epoch) return;
         const adv = (idx + 1 < _sections.length)
           ? playFrom(idx + 1, false)
-          : new Promise(ok => setTimeout(() => { _wrap(); ok(); }, LEAD_S * 1000 + 100));
+          : new Promise(ok => setTimeout(() => { if (ep === _epoch) _wrap(); ok(); }, LEAD_S * 1000 + 100));
         Promise.resolve(adv).catch(err => { console.error('[section]', err); _finish(); });
       };
       if (first) startAnimation(from, s.tapeEnd, s.duration - offsetS, onNearEnd, LEAD_S);
@@ -174,6 +180,7 @@
     }
 
     function _finish() {
+      _epoch++;
       _running = false;
       stopAnimation();
       try { _currentSource?.stop(); } catch (e) {}
@@ -192,14 +199,13 @@
     }
 
     function _armGesture() {
-      const cleanup = () => {
-        window.removeEventListener('pointerdown', arm);
-        window.removeEventListener('keydown', arm);
-        window.removeEventListener('touchstart', arm);
-      };
+      let pending = false;
       const arm = () => {
-        if (_audioCtx.state === 'running') { cleanup(); startBed(); return; }
-        _audioCtx.resume().then(() => { cleanup(); startBed(); _resync(); }).catch(() => {});
+        startBed();
+        if (_audioCtx.state === 'running' || pending) return;
+        pending = true;
+        _audioCtx.resume().then(() => { startBed(); _resync(); }).catch(() => {})
+          .finally(() => { pending = false; });
       };
       window.addEventListener('pointerdown', arm);
       window.addEventListener('keydown', arm);
@@ -246,7 +252,7 @@
         appendToTape(flat.slice(0, 2500).replace(/\s\S*$/, '') + ' ');
         initRows(container);
         _unlockAudioContext();
-        if (_audioCtx && _audioCtx.state !== 'running') _armGesture();
+        if (_audioCtx) _armGesture();
         const pre = loopPosition();
         const s0 = _sections[pre.idx];
         snapTo(s0.tapeStart, s0.tapeEnd);
@@ -289,10 +295,17 @@
       }
     });
 
+    window.addEventListener('pageshow', e => {
+      if (!e.persisted || !_running) return;
+      _audioCtx?.resume().catch(() => {});
+      resumeBed();
+      _resync();
+    });
+
   </script>
 
     <script type="module">
-    import { config, tape, getPlayIdx } from "./storm.js";
+    import { config, tape, getPlayIdx, getRowTx } from "./storm.js";
 
     const POP = {
       triggerGapMs: 500,
@@ -365,11 +378,6 @@
       }
       return lo;
     }
-    function _curTx(el) {
-      const t = getComputedStyle(el).transform;
-      return t && t !== 'none' ? new DOMMatrixReadOnly(t).m41 : 0;
-    }
-
     const _popped = new Map();
     const _rowUse = new Map();
 
@@ -408,7 +416,7 @@
              a.y + a.h + POP.overlapPadY < b.y || b.y + b.h + POP.overlapPadY < a.y;
     }
 
-    function _popApply(r, row, spanMap, scale, key, grow) {
+    function _popApply(r, row, ri, spanMap, scale, key, grow) {
       const spans = [];
       for (let ci = r.start; ci < r.end; ci++) {
         const sp = spanMap.get(ci);
@@ -432,7 +440,7 @@
       clone.style.color = '#fff';
       clone.style.textShadow = '0 0 0.35em rgba(255,255,255,0.55)';
       clone.style.fontWeight = '640';
-      _popped.set(key, { key, clone, spans, row, px, t: 0,
+      _popped.set(key, { key, clone, spans, row, ri, px, t: 0,
                          start: r.start, end: r.end, scale, grow });
       return true;
     }
@@ -474,10 +482,8 @@
         return rowBoxes.get(row);
       };
       const taken = [];
-      for (const rec of _popped.values()) {
-        const inner = rec.row.firstElementChild;
-        if (inner) taken.push(_popRect(boxFor(rec.row), _curTx(inner), rec.scale, rec, rec.grow));
-      }
+      for (const rec of _popped.values())
+        taken.push(_popRect(boxFor(rec.row), getRowTx(rec.ri), rec.scale, rec, rec.grow));
       for (const ri of order) {
         if (ri === config.centerRow) continue;
         if (budget <= 0) break;
@@ -486,7 +492,7 @@
         if (!inner) continue;
         if (parseFloat(row.style.opacity || '1') < POP.minRowOpacity) continue;
         const scale = config.fontSizeRatios[ri];
-        const tx = _curTx(inner);
+        const tx = getRowTx(ri);
         const lo = (-tx + POP.edgePx) / scale;
         const hi = (row.clientWidth - tx - POP.edgePx) / scale;
         const rowCap = scale < 0.4 ? 2 : POP.maxPerRow;
@@ -505,7 +511,7 @@
             for (const sp of inner.children)
               if (sp.classList.contains('scroll-item')) spanMap.set(+sp.dataset.ci, sp);
           }
-          if (_popApply(r, row, spanMap, scale, key, grow)) {
+          if (_popApply(r, row, ri, spanMap, scale, key, grow)) {
             taken.push(box);
             n++; budget--;
           }
@@ -535,13 +541,9 @@
       }
       _lastPi = pi;
       if (_triggers.length) {
-        const row = document.getElementById('scroll' + config.centerRow);
-        const inner = row && row.firstElementChild;
-        if (inner) {
-          const tx = _curTx(inner);
-          const scale = config.fontSizeRatios[config.centerRow];
-          _triggers = _triggers.filter(t => tape.cumWidths[t.end] * scale + tx > 0);
-        }
+        const tx = getRowTx(config.centerRow);
+        const scale = config.fontSizeRatios[config.centerRow];
+        _triggers = _triggers.filter(t => tape.cumWidths[t.end] * scale + tx > 0);
         if (!_triggers.length) _settleAll();
       }
     })();

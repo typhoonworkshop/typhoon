@@ -415,14 +415,14 @@ export function getPlayIdx() {
   return _charAt(_curPx());
 }
 
+export function getRowTx(ri) {
+  return -_rangesPx(_curPx())[ri][0] * config.fontSizeRatios[ri];
+}
+
 export function pauseAnimation() {
   if (!_live || _t0 == null || _pausedAt != null) return;
   _pausedAt = performance.now();
-  for (const el of _inners) {
-    const tf = getComputedStyle(el).transform;
-    el.style.transition = 'none';
-    if (tf !== 'none') el.style.transform = tf;
-  }
+  _resumeTransition();
 }
 
 function _pruneOldSpans(playIdx) {
