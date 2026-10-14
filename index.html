@@ -79,6 +79,7 @@
     const _BG = { hC:220, hS:350, sC:60, sS:70, lC:4, lS:7 };
     const _lerp = (a, b, t) => a + (b - a) * t;
     const _mask = document.getElementById('mask');
+    const _spot = document.getElementById('spotlight');
     let _bgLast = null;
     function _bgLoop() {
       const p = Math.round(getProbStorm() * 500) / 500;
@@ -87,8 +88,8 @@
       const color = `hsl(${_lerp(_BG.hC,_BG.hS,p)}, ${_lerp(_BG.sC,_BG.sS,p)}%, ${_lerp(_BG.lC,_BG.lS,p)}%)`;
       document.body.style.backgroundColor = color;
       document.documentElement.style.backgroundColor = color;
-      document.documentElement.style.setProperty('--bg', color);
-      document.documentElement.style.setProperty('--bg0',
+      _spot.style.setProperty('--bg', color);
+      _spot.style.setProperty('--bg0',
         `hsla(${_lerp(_BG.hC,_BG.hS,p)}, ${_lerp(_BG.sC,_BG.sS,p)}%, ${_lerp(_BG.lC,_BG.lS,p)}%, 0)`);
       if (_mask) _mask.style.borderColor = color;
       requestAnimationFrame(_bgLoop);

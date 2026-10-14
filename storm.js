@@ -24,7 +24,7 @@ function _measure(ch) {
     _mSpan = document.createElement('span');
     _mSpan.style.cssText =
       'position:fixed;top:-9999px;left:-9999px;white-space:pre;' +
-      'font-family:"Source Serif 4",serif;' +
+      'font-family:"Source Serif 4",serif;font-optical-sizing:none;' +
       'visibility:hidden;pointer-events:none;';
     document.body.appendChild(_mSpan);
   }
@@ -33,6 +33,9 @@ function _measure(ch) {
     _containerFontSize = container
       ? getComputedStyle(container).fontSize
       : (window.innerWidth * 0.04) + 'px';
+    const opsz = `"opsz" ${Math.min(60, Math.max(8, parseFloat(_containerFontSize)))}`;
+    _mSpan.style.fontVariationSettings = opsz;
+    if (container) container.style.fontVariationSettings = opsz;
   }
   _mSpan.style.fontSize = _containerFontSize;
   _mSpan.textContent = ch;

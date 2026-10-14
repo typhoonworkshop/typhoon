@@ -55,6 +55,7 @@ body {
   flex-direction: column;
   justify-content: center;
   font-size: var(--fontsize);
+  font-optical-sizing: none;
   width: var(--display-width);
   height: var(--display-height);
   border: none;
