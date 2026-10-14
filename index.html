@@ -25,11 +25,34 @@
     <div id="spotlight"></div>
     <div id="mask"></div>
   </div>
+  <div id="enter" role="button" tabindex="0" aria-label="Enter the Typhoon">
+    <h1>Enter the Typhoon</h1>
+    <p id="enter-cta">Loading…</p>
+    <div id="enter-notes">
+      <p>This piece plays sound. Turn your audio on.</p>
+      <p>Best experienced full screen on a desktop or laptop.</p>
+      <p>Once inside, tap or press Space to show or hide the current predicted storm state.</p>
+    </div>
+  </div>
+  <div id="sound-hint" hidden>Tap for sound</div>
+  <aside id="storm-panel" hidden>
+    <p class="sp-label">Predicted storm state</p>
+    <p class="sp-state"><span id="sp-bf">–</span><span id="sp-name"></span></p>
+    <div class="sp-bar"><div id="sp-fill"></div></div>
+    <p class="sp-note">on the Beaufort scale from 0 (calm) to 12 (hurricane)</p>
+    <p class="sp-label sp-row"><span>Story</span><span><span id="sp-left">–</span> left</span></p>
+    <div id="sp-arc" role="progressbar" aria-label="Progress through the story" aria-valuemin="0" aria-valuemax="100">
+      <div id="sp-segs"></div>
+      <div id="sp-ahead"></div>
+      <div id="sp-head"></div>
+    </div>
+    <p class="sp-hint">Tap or press Space to hide.</p>
+  </aside>
 
   <script type="module">
     import { tape, appendToTape, initRows, populateRows, snapTo,
              startAnimation, continueAnimation, stopAnimation, relayout, pauseAnimation,
-             applyRowVisibility, setProbStorm, getProbStorm } from "./storm.js";
+             applyRowVisibility, setProbStorm, getProbStorm, getPlayIdx } from "./storm.js";
     let initStormSound = () => Promise.resolve(), connectStormOutput = () => false,
         startBed = () => false, pauseBed = () => {}, resumeBed = () => {},
         setStorm = () => false, setTts = () => false;
@@ -39,6 +62,13 @@
     } catch (e) { console.warn('[stormsound] module unavailable — running dry', e); }
 
     const container = document.getElementById("container");
+    const _enterEl = document.getElementById('enter');
+    const _ctaEl = document.getElementById('enter-cta');
+    const _hintEl = document.getElementById('sound-hint');
+    const _panelEl = document.getElementById('storm-panel');
+    const KIOSK = new URLSearchParams(location.search).has('kiosk');
+    let _entered = KIOSK, _ready = false;
+    _enterEl.hidden = KIOSK;
 
     const _BG = { hC:220, hS:350, sC:60, sS:70, lC:4, lS:7 };
     const _lerp = (a, b, t) => a + (b - a) * t;
@@ -58,30 +88,52 @@
       requestAnimationFrame(_bgLoop);
     }
 
-    let _audioCtx = null, _currentSource = null, _scheduleCtxAt = 0, _stormReady = null;
-    function _unlockAudioContext() {
+    let _audioCtx = null, _scheduleCtxAt = 0, _stormReady = null;
+    let _voices = [], _voiceStale = true, _stalled = false;
+    function _initAudio() {
       try {
         _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const buf = _audioCtx.createBuffer(1, 1, 22050);
-        const src = _audioCtx.createBufferSource();
-        src.buffer = buf; src.connect(_audioCtx.destination); src.start(0);
-        if (_audioCtx.state === 'suspended') _audioCtx.resume();
+        _audioCtx.addEventListener('statechange', _onAudioState);
+        if (!_entered) _audioCtx.suspend().catch(() => {});
         _stormReady = initStormSound(_audioCtx)
-          .then(() => { connectStormOutput(_audioCtx.destination); startBed(); })
+          .then(() => { connectStormOutput(_audioCtx.destination); if (_entered) startBed(); })
           .catch(e => { console.warn('[stormsound] init failed — running without ambience', e); });
-      } catch (e) { console.warn('[audio unlock]', e); }
+      } catch (e) { console.warn('[audio init]', e); }
     }
-    function _playBuffer(buffer, offsetS = 0) {
+    function _unlockAudio() {
+      if (!_audioCtx) return;
+      if (_audioCtx.state !== 'running' || _stalled) {
+        const src = _audioCtx.createBufferSource();
+        src.buffer = _audioCtx.createBuffer(1, 1, 22050);
+        src.connect(_audioCtx.destination); src.start(0);
+        _audioCtx.resume().catch(() => {});
+      }
+      startBed();
+    }
+    function _onAudioState() {
+      if (_audioCtx.state !== 'running') { _voiceStale = true; _stopVoices(); }
+      else if (_voiceStale && _canSound() && !_stalled) _resync();
+      _updateHint();
+    }
+    function _playBuffer(idx, buffer, offsetS = 0) {
+      if (!_entered || _audioCtx.state !== 'running' || _stalled) { _voiceStale = true; return; }
       const src = _audioCtx.createBufferSource();
       src.buffer = buffer; src.connect(_audioCtx.destination);
-      if (_audioCtx.state !== 'running') { try { _currentSource?.stop(); } catch (e) {} }
+      const off = Math.min(offsetS, Math.max(0, buffer.duration - 0.05));
       const startAt = Math.max(_audioCtx.currentTime, _scheduleCtxAt);
-      src.start(startAt, Math.min(offsetS, Math.max(0, buffer.duration - 0.05)));
+      src.start(startAt, off);
       const leadMs = Math.max(0, (startAt - _audioCtx.currentTime) * 1000);
       setTimeout(() => setTts(1), leadMs);
-      src.onended = () => { if (_currentSource === src) setTts(0); };
-      _currentSource = src;
-      _scheduleCtxAt = startAt + buffer.duration - Math.min(offsetS, buffer.duration);
+      const v = { src, idx, at: startAt, off, end: startAt + buffer.duration - off };
+      src.onended = () => { _voices = _voices.filter(x => x !== v); if (!_voices.length) setTts(0); };
+      _voices.push(v);
+      _voiceStale = false;
+      _scheduleCtxAt = v.end;
+    }
+    function _stopVoices() {
+      for (const v of _voices) { try { v.src.stop(); } catch (e) {} }
+      _voices = [];
+      _scheduleCtxAt = 0;
     }
     function decode(section) {
       section._bufferPromise ??= fetch(section.audio_url)
@@ -94,12 +146,14 @@
 
     const LEAD_S = 0.35;
     const DRIFT_TOLERANCE_S = 3;
+    const SYNC_TOLERANCE_S = 0.5;
     let _sections = [];
     let _running = false;
     let _epoch = 0;
     let _totalSec = 0;
     let _clockSkewMs = 0;
     const _now = () => Date.now() + _clockSkewMs;
+    const _canSound = () => _entered && _running && !document.hidden;
 
     function loopPosition() {
       const total = _totalSec || _sections.reduce((a, s) => a + s.duration, 0);
@@ -121,6 +175,9 @@
 
     async function playFrom(idx, first, offsetS = 0) {
       const ep = _epoch;
+      if (!first && _voiceStale && _canSound() && _audioCtx.state === 'running' && !_stalled) {
+        _resync(); return;
+      }
       if (!first && _totalSec) {
         const pos = loopPosition();
         const here = _sections[idx].startSec;
@@ -148,11 +205,11 @@
         : s.tapeStart;
       setProbStorm(s.prob_storm);
       setStorm(s.prob_storm);
-      if (_audioCtx.state !== 'running' && !document.hidden) _audioCtx.resume().catch(() => {});
-      if (!document.hidden) resumeBed();
+      if (_entered && _audioCtx.state !== 'running' && !document.hidden) _audioCtx.resume().catch(() => {});
+      if (_entered && !document.hidden) resumeBed();
       if (first) snapTo(from, s.tapeEnd);
       populateRows(from, from);
-      _playBuffer(s._buffer, offsetS);
+      _playBuffer(idx, s._buffer, offsetS);
       const onNearEnd = () => {
         if (ep !== _epoch) return;
         const adv = (idx + 1 < _sections.length)
@@ -173,9 +230,7 @@
 
     function _wrap() {
       stopAnimation();
-      try { _currentSource?.stop(); } catch (e) {}
-      _currentSource = null;
-      _scheduleCtxAt = 0;
+      _stopVoices();
       _startAtClock();
     }
 
@@ -183,8 +238,7 @@
       _epoch++;
       _running = false;
       stopAnimation();
-      try { _currentSource?.stop(); } catch (e) {}
-      _currentSource = null;
+      _stopVoices();
       setTts(0);
       pauseBed();
       if (_sections.length) setTimeout(_resync, 5000);
@@ -192,25 +246,116 @@
 
     function _resync() {
       stopAnimation();
-      try { _currentSource?.stop(); } catch (e) {}
-      _currentSource = null;
-      _scheduleCtxAt = 0;
+      _stopVoices();
       _startAtClock();
     }
 
-    function _armGesture() {
-      let pending = false;
-      const arm = () => {
-        startBed();
-        if (_audioCtx.state === 'running' || pending) return;
-        pending = true;
-        _audioCtx.resume().then(() => { startBed(); _resync(); }).catch(() => {})
-          .finally(() => { pending = false; });
-      };
-      window.addEventListener('pointerdown', arm);
-      window.addEventListener('keydown', arm);
-      window.addEventListener('touchstart', arm);
+    let _hintT = 0;
+    function _updateHint() {
+      clearTimeout(_hintT);
+      if (_entered && !document.hidden && _audioCtx && (_audioCtx.state !== 'running' || _stalled))
+        _hintT = setTimeout(() => { _hintEl.hidden = false; }, 1500);
+      else _hintEl.hidden = true;
     }
+
+    let _wakeLock = null;
+    function _keepAwake() {
+      if (!('wakeLock' in navigator) || _wakeLock || document.hidden) return;
+      navigator.wakeLock.request('screen')
+        .then(l => { _wakeLock = l; l.addEventListener('release', () => { _wakeLock = null; }); })
+        .catch(() => {});
+    }
+
+    function _enter() {
+      if (_entered || !_ready) return;
+      _entered = true;
+      _voiceStale = true;
+      _unlockAudio();
+      _enterEl.hidden = true;
+      _keepAwake();
+      if (_audioCtx?.state === 'running' && _running) _resync();
+      _updateHint();
+    }
+    _enterEl.addEventListener('click', e => { e.stopPropagation(); _enter(); });
+
+    for (const type of ['pointerup', 'touchend', 'click', 'keydown'])
+      window.addEventListener(type, () => { if (_entered) _unlockAudio(); }, { capture: true, passive: true });
+
+    const _BEAUFORT = ['Calm', 'Light air', 'Light breeze', 'Gentle breeze', 'Moderate breeze', 'Fresh breeze',
+                       'Strong breeze', 'Near gale', 'Gale', 'Strong gale', 'Storm', 'Violent storm', 'Hurricane'];
+    const _sp = id => document.getElementById(id);
+    let _panelT = 0;
+    function _storyPosition() {
+      const pi = getPlayIdx();
+      const k = _sections.findIndex(s => pi >= s.tapeStart && pi < s.tapeEnd);
+      if (k < 0) { const p = loopPosition(); return { idx: p.idx, sec: _sections[p.idx].startSec + p.offset }; }
+      const s = _sections[k];
+      return { idx: k, sec: s.startSec + (pi - s.tapeStart) / (s.tapeEnd - s.tapeStart) * s.duration };
+    }
+    function _renderPanel() {
+      if (!_sections.length) return;
+      const { idx, sec } = _storyPosition();
+      const p = _sections[idx].prob_storm, bf = Math.round(p * 120) / 10, left = Math.max(0, _totalSec - sec);
+      _sp('sp-bf').textContent = bf.toFixed(1);
+      _sp('sp-name').textContent = _BEAUFORT[Math.min(12, Math.max(0, Math.round(bf)))];
+      _sp('sp-fill').style.width = `${(bf / 12) * 100}%`;
+      _sp('sp-fill').style.backgroundColor = `hsl(${_lerp(_BG.hC, _BG.hS, p)}, 65%, 60%)`;
+      _sp('sp-left').textContent = `${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, '0')}`;
+      const pct = (sec / _totalSec) * 100, arc = _sp('sp-arc');
+      _sp('sp-ahead').style.left = _sp('sp-head').style.left = `${pct}%`;
+      arc.setAttribute('aria-valuenow', Math.floor(pct));
+      arc.title = `Passage ${idx + 1} of ${_sections.length} · ${Math.floor(pct)}% through`;
+      arc.setAttribute('aria-valuetext', arc.title);
+    }
+    function _buildArc() {
+      _sp('sp-segs').replaceChildren(..._sections.map(s => {
+        const seg = document.createElement('div');
+        seg.style.flexGrow = s.duration;
+        seg.style.backgroundColor = `hsl(${_lerp(_BG.hC, _BG.hS, s.prob_storm)}, 55%, 55%)`;
+        return seg;
+      }));
+    }
+    function _togglePanel(show = _panelEl.hidden) {
+      _panelEl.hidden = !show;
+      clearInterval(_panelT);
+      if (show && !_sp('sp-segs').childElementCount) _buildArc();
+      if (show) { _renderPanel(); _panelT = setInterval(_renderPanel, 500); }
+    }
+    
+    const _soundOff = () => !!_audioCtx && (_audioCtx.state !== 'running' || _stalled);
+    const _onTap = () => { if (_entered && !_soundOff()) _togglePanel(); };
+    container.addEventListener('click', _onTap);
+    _panelEl.addEventListener('click', _onTap);
+    window.addEventListener('keydown', e => {
+      if (e.key === ' ' || e.key === 'Enter') {
+        if (e.key === ' ') e.preventDefault();
+        if (e.repeat) return;
+        if (!_entered) _enter();
+        else if (e.key === ' ' && !_soundOff()) _togglePanel();
+      } else if (e.key === 'Escape' && !_panelEl.hidden) _togglePanel(false);
+    });
+
+    let _drift = 0, _lastCt = 0, _lastPt = 0, _wasRunning = false;
+    setInterval(() => {
+      if (!_audioCtx || !_canSound()) { _wasRunning = false; return; }
+      const ct = _audioCtx.currentTime, pt = performance.now();
+      const running = _audioCtx.state === 'running';
+      const stalled = running && _wasRunning && ct - _lastCt < (pt - _lastPt) / 2000;
+      _wasRunning = running; _lastCt = ct; _lastPt = pt;
+      if (stalled !== _stalled) {
+        _stalled = stalled;
+        if (stalled) { _voiceStale = true; _stopVoices(); }
+        else if (_voiceStale) _resync();
+        _updateHint();
+      }
+      if (!running || stalled) return;
+      const v = _voices.find(v => v.at <= ct && ct < v.end);
+      if (!v) return;
+      let d = _sections[v.idx].startSec + v.off + (ct - v.at) - (_now() / 1000) % _totalSec;
+      d -= Math.round(d / _totalSec) * _totalSec;
+      _drift = Math.abs(d) > SYNC_TOLERANCE_S ? _drift + 1 : 0;
+      if (_drift >= 2) { _drift = 0; _resync(); }
+    }, 1000);
 
     async function boot() {
       try {
@@ -251,8 +396,7 @@
         }
         appendToTape(flat.slice(0, 2500).replace(/\s\S*$/, '') + ' ');
         initRows(container);
-        _unlockAudioContext();
-        if (_audioCtx) _armGesture();
+        _initAudio();
         const pre = loopPosition();
         const s0 = _sections[pre.idx];
         snapTo(s0.tapeStart, s0.tapeEnd);
@@ -271,6 +415,12 @@
       } catch (e) {
         console.error(e);
         _finish();
+      } finally {
+        _ready = true;
+        _ctaEl.textContent = 'Tap to begin';
+        _enterEl.classList.add('ready');
+        if (!_enterEl.hidden) _enterEl.focus({ preventScroll: true });
+        _updateHint();
       }
     }
 
@@ -282,24 +432,31 @@
       _rt = setTimeout(() => { if (_running && tape.chars.length) relayout(); }, 250);
     });
 
+    function _wake() {
+      if (_entered) {
+        _audioCtx?.resume().catch(() => {});
+        resumeBed();
+        _keepAwake();
+      }
+      _resync();
+      _updateHint();
+    }
+
     document.addEventListener('visibilitychange', () => {
       if (!_running) return;
       if (document.hidden) {
         pauseAnimation();
         pauseBed();
         _audioCtx?.suspend().catch(() => {});
+        _updateHint();
       } else {
-        _audioCtx?.resume().catch(() => {});
-        resumeBed();
-        _resync();
+        _wake();
       }
     });
 
     window.addEventListener('pageshow', e => {
       if (!e.persisted || !_running) return;
-      _audioCtx?.resume().catch(() => {});
-      resumeBed();
-      _resync();
+      _wake();
     });
 
   </script>
@@ -530,6 +687,10 @@
       }
       if (!_ranges.length) return;
       const pi = getPlayIdx();
+      if (_lastPi - pi > POP.jumpChars) {
+        _cancelAll();
+        _ri = _rangeAtPx(tape.cumWidths[pi]);
+      }
       const jumped = pi - _lastPi > POP.jumpChars || pi < _lastPi;
       while (_ri < _ranges.length && _ranges[_ri].start <= pi) {
         const r = _ranges[_ri++];

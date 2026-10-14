@@ -36,6 +36,7 @@ body {
   overflow: hidden;
   touch-action: none;
   overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
 }
 #spotlight {
   position: absolute;
@@ -85,4 +86,184 @@ body {
   background-color: rgba(255,255,255,0);
   border: var(--border-mask) solid hsl(220, 60%, 4%);
   pointer-events: none;
+}
+#enter {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 1.5rem;
+  box-sizing: border-box;
+  text-align: center;
+  background: hsla(220, 60%, 4%, 0.6);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  cursor: progress;
+  outline: none;
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  #enter {
+    background: hsla(220, 60%, 4%, 0.88);
+  }
+}
+#enter.ready {
+  cursor: pointer;
+}
+#enter[hidden], #sound-hint[hidden], #storm-panel[hidden] {
+  display: none;
+}
+#enter h1 {
+  margin: 0;
+  font-weight: 300;
+  font-size: clamp(2.1rem, 7vw, 4.2rem);
+  letter-spacing: 0.03em;
+}
+#enter-cta {
+  margin: 0;
+  font-size: clamp(1.05rem, 2.4vw, 1.35rem);
+  letter-spacing: 0.1em;
+  opacity: 0.5;
+}
+#enter.ready #enter-cta {
+  opacity: 1;
+  animation: enter-breathe 3s ease-in-out infinite;
+}
+@keyframes enter-breathe {
+  50% { opacity: 0.55; }
+}
+#enter-notes {
+  max-width: 30rem;
+  margin-top: 1.4rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.62);
+}
+#enter-notes p {
+  margin: 0.25rem 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  #enter.ready #enter-cta {
+    animation: none;
+  }
+}
+#sound-hint {
+  position: fixed;
+  left: 50%;
+  bottom: max(1.5rem, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 10;
+  padding: 0.5em 1.2em;
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 999px;
+  pointer-events: none;
+}
+#storm-panel {
+  position: fixed;
+  top: max(1rem, env(safe-area-inset-top));
+  right: max(1rem, env(safe-area-inset-right));
+  z-index: 9;
+  box-sizing: border-box;
+  width: min(22rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  max-height: calc(100svh - 2rem);
+  overflow-y: auto;
+  touch-action: pan-y;
+  padding: 1rem 1.15rem;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.85);
+  background: hsla(220, 60%, 4%, 0.72);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+}
+#storm-panel p {
+  margin: 0 0 0.6rem;
+}
+#storm-panel .sp-label {
+  margin-bottom: 0.3rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+}
+#storm-panel .sp-state {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin-bottom: 0.45rem;
+}
+#sp-bf {
+  font-size: 2.2rem;
+  font-weight: 300;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+#sp-name {
+  font-size: 1.15rem;
+}
+#storm-panel .sp-bar {
+  height: 3px;
+  margin-bottom: 0.6rem;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+}
+#sp-fill {
+  width: 0;
+  height: 100%;
+  transition: width 0.6s ease, background-color 0.6s ease;
+}
+#storm-panel .sp-note {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.55);
+}
+#storm-panel .sp-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+#sp-arc {
+  position: relative;
+  height: 8px;
+  margin-bottom: 0.9rem;
+  overflow: hidden;
+  border-radius: 2px;
+}
+#sp-segs {
+  display: flex;
+  height: 100%;
+}
+#sp-segs > div {
+  flex-basis: 0;
+  box-shadow: inset -1px 0 0 hsla(220, 60%, 4%, 0.8);
+}
+#sp-ahead {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  background: hsla(220, 60%, 4%, 0.68);
+}
+#sp-head {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: white;
+}
+#storm-panel .sp-hint {
+  margin: 0;
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.45);
 }
